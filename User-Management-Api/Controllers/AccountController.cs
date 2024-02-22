@@ -6,7 +6,9 @@ using Microsoft.IdentityModel.Tokens;
 using User_Management_Api.Data;
 using User_Management_Api.Model;
 using User_Management_Api.ViewModel;
-
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
 namespace User_Management_Api.Controllers
 {
     [Route("api/[controller]")]
@@ -14,9 +16,11 @@ namespace User_Management_Api.Controllers
     public class AccountController : ControllerBase
     {
         private readonly AppDbContext _db;
-        public AccountController(AppDbContext db)
+        private readonly IConfiguration _config;
+        public AccountController(AppDbContext db, IConfiguration config)
         {
             _db = db;
+            _config = config;
         }
 
 
@@ -24,46 +28,88 @@ namespace User_Management_Api.Controllers
         [HttpPost("Register")]
         public JsonResult Register(User user)
         {
-            if(_db.Users.SingleOrDefault((u) => user.Name == u.Name) != null)
+           
+            try
             {
-                return new JsonResult(new { status="Error",message="Username Already exist"});
-            }
-            if(!user.Name.IsNullOrEmpty() && !user.HashedPassword.IsNullOrEmpty() && user.HashedPassword != null)
-            {
-                user.Role = null;
-                _db.Users.Add(user);
-                _db.SaveChanges();
-                return new JsonResult("Success");
-            }
+                if (_db.Users.FirstOrDefault((u) => user.Name == u.Name) != null)
+                {
+                    return new JsonResult(new { status = "Error", message = "Username Already exist" });
+                }
+                if (!user.Name.IsNullOrEmpty() && !user.HashedPassword.IsNullOrEmpty() && user.HashedPassword != null)
+                {
+                    user.RoleId = 2;
+                    _db.Users.Add(user);
+                    _db.SaveChanges();
+                    return new JsonResult(new { status = "Success", message = "User regitered successfully" });
+                }
 
-            return new JsonResult(new {status= "Error",message = "Invalied inputs" });
+                return new JsonResult(new { status = "Error", message = "Invalied inputs" });
+            }
+            catch(Exception ex)
+            {
+                return new JsonResult(new { status = "Error", message = ex.Message });
+            }
         }
 
         [HttpPost("Login")]
-        public JsonResult Login(LoginViewModel model)
+        public async Task<ActionResult> Login([FromBody] LoginViewModel model)
         {
-            User? user = (User?)_db.Users.Where(u => u.Name == model.Name);
             
-            if (user == null || user.HashedPassword == null || model.HashedPassword == null)
+
+            try
             {
-                return new JsonResult(new { status = "Error", message = "Username not exitst " });
-            }
-            
-            if (user.HashedPassword!= model.HashedPassword)
-            {
-                return new JsonResult(new { status = "Error", message = "Password is wrong " });
-            }
-            if (user.Role != null)
-            {
-                if (user.Role.RoleName == "ADMIN")
+                User? user = await _db.Users.FirstOrDefaultAsync(u => u.Name == model.Name);
+                user.Role = await _db.Roles.FirstOrDefaultAsync(u => u.RoleId == user.RoleId);
+
+                if (user == null)
                 {
-                    return new JsonResult(new { status = "Success", Role = user.Role.RoleName ,  message = "Success fully logined " });
+                    return new JsonResult(new { status = "Error", message = "Username does not exist" });
                 }
+                if (user.IsBlocked)
+                {
+                    return new JsonResult(new { status = "Error", message = "User is blocked by Admin" });
+                }
+
+                if (user.HashedPassword != model.HashedPassword)
+                {
+                    return new JsonResult(new { status = "Error", message = "Password is wrong" });
+                }
+
+                if (user.Role != null && user.Role.RoleName == "ADMIN")
+                {
+                    return new JsonResult(new { status = "Success", token = GenerateJwtToken(user.Name,user.Id,true), RoleId = user.RoleId, message = "Successfully logged in",userId = user.Id });
+                }
+
+                return new JsonResult(new { status = "Success", token = GenerateJwtToken(user.Name,user.Id), message = "Successfully logged in" });
             }
-            
-            return new JsonResult(new { status = "Success", message = "Success fully logined " });
-
-
+            catch (Exception ex)
+            {
+                return new JsonResult(new { status = "Error", message = ex.Message });
+            }
         }
+
+        private string GenerateJwtToken(string? username, int userId,bool isAdmin = false)
+        {
+            var key = Encoding.ASCII.GetBytes(_config["JwtSettings:Secret"]);
+            var tokenHandler = new JwtSecurityTokenHandler();
+
+            var claims = new List<Claim>
+            {
+                new Claim(ClaimTypes.Name, username),
+                new Claim("userId", userId.ToString()), 
+                new Claim("isAdmin", isAdmin.ToString()),
+            };
+
+            var tokenDescriptor = new SecurityTokenDescriptor
+            {
+                Subject = new ClaimsIdentity(claims),
+                Expires = DateTime.UtcNow.AddDays(1),
+                SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature)
+            };
+
+            var token = tokenHandler.CreateToken(tokenDescriptor);
+            return tokenHandler.WriteToken(token);
+        }
+
     }
 }
